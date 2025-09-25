@@ -12,9 +12,9 @@ def load_calibration_yaml(path):
     K = fs.getNode("camera_matrix").mat()
     D = fs.getNode("distortion_coefficients").mat()
     fs.release()
-
-    # Accept row vectors like 1x5; reshape to (1,5) for OpenCV
-    D = D.reshape(1, -1)
+    if K is None or D is None:
+        raise ValueError("camera_matrix or distortion_coefficients not found in YAML")
+    D = D.reshape(1, -1)  # ensure shape (1,N)
     return K, D
 
 def rvec_tvec_to_T(rvec, tvec):
@@ -33,12 +33,13 @@ def invert_T(T):
     return Ti
 
 def R_to_ypr_zyx(R):
-    # ZYX: yaw (around Z), pitch (around Y), roll (around X)
+    # ZYX convention (yaw around Z, pitch around Y, roll around X)
     yaw = degrees(atan2(R[1,0], R[0,0]))
     pitch = degrees(asin(-R[2,0]))
     roll = degrees(atan2(R[2,1], R[2,2]))
     return yaw, pitch, roll
 
+# Map friendly names to OpenCV constants
 DICT_MAP = {
     "4X4_50": cv2.aruco.DICT_4X4_50,
     "4X4_100": cv2.aruco.DICT_4X4_100,
@@ -62,33 +63,22 @@ DICT_MAP = {
     "APRILTAG_36h11": cv2.aruco.DICT_APRILTAG_36h11,
 }
 
-def make_detector(dict_name):
-    aruco_dict = cv2.aruco.getPredefinedDictionary(DICT_MAP[dict_name])
-    # Support both new (4.7+) and older OpenCV ArUco APIs
-    if hasattr(cv2.aruco, "DetectorParameters"):
-        params = cv2.aruco.DetectorParameters()
-        detector = cv2.aruco.ArucoDetector(aruco_dict, params)
-        return detector, None  # use detector.detectMarkers(frame)
+def get_aruco_dict(dict_name):
+    # Works across older/newer OpenCV builds
+    const = DICT_MAP[dict_name]
+    if hasattr(cv2.aruco, "getPredefinedDictionary"):
+        return cv2.aruco.getPredefinedDictionary(const)
     else:
-        params = cv2.aruco.DetectorParameters_create()
-        return (aruco_dict, params), "legacy"  # use cv2.aruco.detectMarkers(frame, aruco_dict, parameters=params)
-
-def detect_markers(frame, detector):
-    if isinstance(detector, tuple) and detector[1] == "legacy":
-        aruco_dict, params = detector[0], cv2.aruco.DetectorParameters_create()
-        corners, ids, rejected = cv2.aruco.detectMarkers(frame, aruco_dict, parameters=params)
-    else:
-        corners, ids, rejected = detector.detectMarkers(frame)
-    return corners, ids, rejected
+        return cv2.aruco.Dictionary_get(const)
 
 def main():
-    ap = argparse.ArgumentParser(description="Print camera pose relative to an ArUco tag.")
-    ap.add_argument("--calib", default="calibration/camera_calibration.yaml",
+    ap = argparse.ArgumentParser(description="Print camera pose relative to an ArUco tag (legacy OpenCV API).")
+    ap.add_argument("--calib", default="camera_calibration.yaml",
                     help="Path to OpenCV YAML with camera_matrix and distortion_coefficients.")
     ap.add_argument("--marker-length", type=float, required=True,
                     help="Marker edge length in meters (e.g., 0.04 for 4 cm).")
     ap.add_argument("--dict", default="4X4_50", choices=list(DICT_MAP.keys()),
-                    help="ArUco dictionary of your printed tag.")
+                    help="ArUco dictionary for your printed tag.")
     ap.add_argument("--id", type=int, default=None,
                     help="If set, only report this marker ID (ignore others).")
     ap.add_argument("--camera-index", type=int, default=0,
@@ -97,16 +87,21 @@ def main():
     ap.add_argument("--height", type=int, default=720)
     args = ap.parse_args()
 
+    # Load calibration
     try:
         K, D = load_calibration_yaml(args.calib)
     except Exception as e:
         print(f"[ERROR] Loading calibration: {e}", file=sys.stderr)
         sys.exit(1)
 
+    # Prepare detector (legacy API)
     try:
-        detector = make_detector(args.dict)
+        aruco_dict = get_aruco_dict(args.dict)
+        params = (cv2.aruco.DetectorParameters_create()
+                  if hasattr(cv2.aruco, "DetectorParameters_create")
+                  else cv2.aruco.DetectorParameters())  # very old builds may expose class ctor
     except Exception as e:
-        print(f"[ERROR] ArUco dictionary setup failed: {e}", file=sys.stderr)
+        print(f"[ERROR] ArUco setup failed: {e}", file=sys.stderr)
         sys.exit(1)
 
     cap = cv2.VideoCapture(args.camera_index)
@@ -117,7 +112,7 @@ def main():
         print("[ERROR] Could not open camera.", file=sys.stderr)
         sys.exit(1)
 
-    print("# Running. Press Ctrl+C to quit.", flush=True)
+    print("# Running. Ctrl+C to quit.", flush=True)
     print("# Output: id, x y z (m), yaw pitch roll (deg)  [camera in tag frame]", flush=True)
 
     try:
@@ -127,13 +122,14 @@ def main():
                 print("[WARN] Failed to read frame.")
                 continue
 
-            corners, ids, _ = detect_markers(frame, detector)
+            # Detect markers (legacy API)
+            corners, ids, _rej = cv2.aruco.detectMarkers(frame, aruco_dict, parameters=params)
+
             if ids is None or len(ids) == 0:
                 continue
 
-            # Pose for each marker
-            # estimatePoseSingleMarkers expects undistorted model; pass K, D anyway
-            rvecs, tvecs, _objPoints = cv2.aruco.estimatePoseSingleMarkers(
+            # Estimate pose
+            rvecs, tvecs, _obj = cv2.aruco.estimatePoseSingleMarkers(
                 corners, args.marker_length, K, D
             )
 
@@ -144,17 +140,15 @@ def main():
                 rvec = rvecs[i]
                 tvec = tvecs[i]
 
-                # T_tag_in_cam: tag->camera
+                # tag -> camera
                 T_tag_in_cam = rvec_tvec_to_T(rvec, tvec)
-
-                # We want camera pose in tag frame => invert
+                # camera -> tag (what we want)
                 T_cam_in_tag = invert_T(T_tag_in_cam)
 
                 t = T_cam_in_tag[:3, 3]
                 R = T_cam_in_tag[:3, :3]
                 yaw, pitch, roll = R_to_ypr_zyx(R)
 
-                # Print a single concise line
                 print(f"id {id_}: "
                       f"x={t[0]:+.3f}  y={t[1]:+.3f}  z={t[2]:+.3f}  "
                       f"yaw={yaw:+.1f}  pitch={pitch:+.1f}  roll={roll:+.1f}",
