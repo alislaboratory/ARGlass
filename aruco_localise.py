@@ -1,16 +1,16 @@
-# Minimal ArUco pose estimation (OpenCV 4.6.0) using Picamera2 + OpenCV
+# ArUco pose estimation (OpenCV 4.6.0) using Picamera2 + OpenCV
 # - Shows live stream with detected marker outlines and axes
 # - Prints pose (rvec, tvec) to console for each detected marker
+# Fixes: drawDetectedMarkers assertion by always drawing on a 3-channel BGR image.
 # Requirements: opencv-contrib-python==4.6.0.*, picamera2
 
 import cv2
 import numpy as np
 from picamera2 import Picamera2
 
-# ---- USER TWEAKABLE: real-world marker side length (meters) ----
-MARKER_LENGTH_METERS = 0.094  # change to your marker's size
+MARKER_LENGTH_METERS = 0.094  # <- set to your tag's side length (m)
 
-# ---- Load camera calibration (OpenCV YAML format) ----
+# --- Load calibration (OpenCV YAML) ---
 calib_path = "calibration/camera_calibration.yaml"
 fs = cv2.FileStorage(calib_path, cv2.FILE_STORAGE_READ)
 if not fs.isOpened():
@@ -21,31 +21,45 @@ fs.release()
 if camera_matrix is None or dist_coeffs is None:
     raise ValueError("Failed to load camera_matrix or distortion_coefficients from YAML.")
 
-# ---- Set up Picamera2 ----
+# --- Picamera2 setup ---
 picam2 = Picamera2()
-#picam2.configure(picam2.create_video_configuration(main={"format": "RGB888", "size": (1280, 720)}))
+# picam2.configure(picam2.create_video_configuration(main={"format": "RGB888", "size": (1280, 720)}))
 picam2.start()
 
-# ---- ArUco setup for OpenCV 4.6.0 ----
+# --- ArUco (OpenCV 4.6.0 API) ---
 aruco = cv2.aruco
-dictionary = aruco.Dictionary_get(aruco.DICT_6X6_50)  # change if your dictionary differs
+dictionary = aruco.Dictionary_get(aruco.DICT_6X6_50)  # change if your tags use another dict
 parameters = aruco.DetectorParameters_create()
 
-print("Press 'q' in the window to quit.")
+print("Press 'q' to quit.")
 
 try:
     while True:
-        frame = picam2.capture_array()  # RGB
-        gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+        frame = picam2.capture_array()  # RGB (uint8)
 
-        # 4.6.0-style detection
+        # Defensive: ensure we have a valid frame
+        if frame is None or frame.size == 0:
+            continue
+
+        # Create a guaranteed 3-channel BGR image for drawing (avoids assertion error)
+        if frame.ndim == 3 and frame.shape[2] == 3:
+            draw_img = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+        elif frame.ndim == 3 and frame.shape[2] == 4:
+            draw_img = cv2.cvtColor(frame, cv2.COLOR_RGBA2BGR)
+        else:
+            # If somehow single-channel, convert to BGR for drawing
+            draw_img = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+
+        # Use grayscale for detection
+        gray = cv2.cvtColor(draw_img, cv2.COLOR_BGR2GRAY)
+
         corners, ids, _rejected = aruco.detectMarkers(gray, dictionary, parameters=parameters)
 
         if ids is not None and len(ids) > 0:
-            # Draw marker borders and IDs
-            aruco.drawDetectedMarkers(frame, corners, ids)
+            # Draw marker borders/IDs on the 3-channel image
+            aruco.drawDetectedMarkers(draw_img, corners, ids)
 
-            # Estimate pose for each detected marker
+            # Pose estimation
             rvecs, tvecs, _objPoints = aruco.estimatePoseSingleMarkers(
                 corners, MARKER_LENGTH_METERS, camera_matrix, dist_coeffs
             )
@@ -53,21 +67,20 @@ try:
             for i, marker_id in enumerate(ids.flatten()):
                 rvec, tvec = rvecs[i][0], tvecs[i][0]
 
-                # Draw axis (length = half the marker side)
-                cv2.drawFrameAxes(frame, camera_matrix, dist_coeffs, rvec, tvec, MARKER_LENGTH_METERS * 0.5)
+                # Draw axis
+                cv2.drawFrameAxes(draw_img, camera_matrix, dist_coeffs, rvec, tvec, MARKER_LENGTH_METERS * 0.5)
 
-                # Label
+                # Label near the marker center
                 c = corners[i][0].astype(int)
-                corner_pt = (int(c[:, 0].mean()), int(c[:, 1].mean()))
-                cv2.putText(frame, f"ID {int(marker_id)}", corner_pt, cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+                center_pt = (int(c[:, 0].mean()), int(c[:, 1].mean()))
+                cv2.putText(draw_img, f"ID {int(marker_id)}", center_pt,
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
 
-                # Print pose to console (meters; rvec is Rodrigues rotation vector in radians)
-                print(f"Marker ID {int(marker_id)}:")
-                print(f"  tvec (m): [{tvec[0]: .4f}, {tvec[1]: .4f}, {tvec[2]: .4f}]")
-                print(f"  rvec (rad): [{rvec[0]: .4f}, {rvec[1]: .4f}, {rvec[2]: .4f}]")
+                # Print pose (meters) to console
+                print(f"ID {int(marker_id)}  tvec(m)=[{tvec[0]:.4f}, {tvec[1]:.4f}, {tvec[2]:.4f}]  "
+                      f"rvec(rad)=[{rvec[0]:.4f}, {rvec[1]:.4f}, {rvec[2]:.4f}]")
 
-        # Show stream
-        cv2.imshow("ArUco Pose (press 'q' to quit)", cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+        cv2.imshow("ArUco Pose (OpenCV 4.6.0) - press 'q' to quit", draw_img)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
