@@ -8,7 +8,7 @@ import numpy as np
 from picamera2 import Picamera2
 
 # ---- USER TWEAKABLE: real-world marker side length (meters) ----
-MARKER_LENGTH_METERS = 0.05  # change to your marker's size
+MARKER_LENGTH_METERS = 0.094  # change to your marker's size
 
 # ---- Load camera calibration (OpenCV YAML format) ----
 calib_path = "calibration/camera_calibration.yaml"
@@ -23,12 +23,12 @@ if camera_matrix is None or dist_coeffs is None:
 
 # ---- Set up Picamera2 ----
 picam2 = Picamera2()
-picam2.configure(picam2.create_video_configuration(main={"format": "RGB888", "size": (1280, 720)}))
+#picam2.configure(picam2.create_video_configuration(main={"format": "RGB888", "size": (1280, 720)}))
 picam2.start()
 
 # ---- ArUco setup for OpenCV 4.6.0 ----
 aruco = cv2.aruco
-dictionary = aruco.Dictionary_get(aruco.DICT_4X4_50)  # change if your dictionary differs
+dictionary = aruco.Dictionary_get(aruco.DICT_6X6_50)  # change if your dictionary differs
 parameters = aruco.DetectorParameters_create()
 
 print("Press 'q' in the window to quit.")
