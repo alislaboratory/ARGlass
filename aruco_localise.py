@@ -73,7 +73,7 @@ def get_aruco_dict(dict_name):
 
 def main():
     ap = argparse.ArgumentParser(description="Print camera pose relative to an ArUco tag (legacy OpenCV API).")
-    ap.add_argument("--calib", default="camera_calibration.yaml",
+    ap.add_argument("--calib", default="calibration/camera_calibration.yaml",
                     help="Path to OpenCV YAML with camera_matrix and distortion_coefficients.")
     ap.add_argument("--marker-length", type=float, required=True,
                     help="Marker edge length in meters (e.g., 0.04 for 4 cm).")
